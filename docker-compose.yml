@@ -1,0 +1,115 @@
+name: optiquery
+
+# Two identical Postgres 16 instances.
+#   primary — the "production" database. Read-only from the agent's perspective.
+#   shadow  — a byte-for-byte logical clone. Every hypothesis (index build, query
+#             rewrite) is applied and benchmarked here, then rolled back.
+#
+# Tuning notes (these apply IDENTICALLY to both instances, so they can never
+# manufacture a before/after speedup — they only reduce variance):
+#
+#   max_parallel_workers_per_gather=0
+#       Parallel worker allocation is nondeterministic under load and is the
+#       single largest source of run-to-run variance in query timing. A
+#       benchmark harness that has to detect a 20% improvement cannot afford
+#       +/-40% noise from how many workers the executor happened to get. Set
+#       PG_PARALLEL=2 in the environment to restore stock behaviour.
+#
+#   fsync/synchronous_commit/full_page_writes=off
+#       These databases are disposable and rebuilt by `make seed`. Turning off
+#       durability roughly halves the bulk COPY load time. It has no effect on
+#       the read benchmarks the verifier actually measures.
+#
+#   random_page_cost=1.1, effective_cache_size=3GB
+#       SSD-shaped cost model. With the stock value of 4.0 the planner
+#       systematically over-prices index scans on rotational-disk assumptions
+#       that no longer hold, which would suppress exactly the plans we want to
+#       evaluate.
+
+x-postgres-common: &postgres-common
+  image: postgres:16
+  environment:
+    POSTGRES_USER: optiquery
+    POSTGRES_PASSWORD: optiquery
+    POSTGRES_DB: optiquery
+    PGDATA: /var/lib/postgresql/data/pgdata
+  command:
+    - postgres
+    - -c
+    - shared_buffers=1GB
+    - -c
+    - effective_cache_size=3GB
+    - -c
+    - work_mem=64MB
+    - -c
+    - maintenance_work_mem=512MB
+    - -c
+    - max_wal_size=4GB
+    - -c
+    - min_wal_size=512MB
+    - -c
+    - checkpoint_timeout=30min
+    - -c
+    - random_page_cost=1.1
+    - -c
+    - effective_io_concurrency=200
+    - -c
+    - track_io_timing=on
+    - -c
+    - max_parallel_workers_per_gather=${PG_PARALLEL:-0}
+    - -c
+    - fsync=off
+    - -c
+    - synchronous_commit=off
+    - -c
+    - full_page_writes=off
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U optiquery -d optiquery"]
+    interval: 3s
+    timeout: 5s
+    retries: 30
+  shm_size: 512mb
+  restart: unless-stopped
+
+services:
+  primary:
+    <<: *postgres-common
+    container_name: optiquery-primary
+    ports:
+      - "55432:5432"
+    volumes:
+      - primary-data:/var/lib/postgresql/data
+
+  shadow:
+    <<: *postgres-common
+    container_name: optiquery-shadow
+    ports:
+      - "55433:5432"
+    volumes:
+      - shadow-data:/var/lib/postgresql/data
+
+  # Not started by `docker compose up` (see profiles). Run explicitly:
+  #   docker compose run --rm seeder
+  seeder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: optiquery-app:latest
+    container_name: optiquery-seeder
+    profiles: ["tools"]
+    depends_on:
+      primary:
+        condition: service_healthy
+      shadow:
+        condition: service_healthy
+    environment:
+      PRIMARY_DSN: postgresql://optiquery:optiquery@primary:5432/optiquery
+      SHADOW_DSN: postgresql://optiquery:optiquery@shadow:5432/optiquery
+    volumes:
+      - ./seed:/app/seed
+      - ./app:/app/app
+    command: ["python", "seed/generate_data.py", "--target", "both"]
+
+volumes:
+  primary-data:
+  shadow-data:
