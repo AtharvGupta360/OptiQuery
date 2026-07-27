@@ -112,9 +112,11 @@ services:
     environment:
       PRIMARY_DSN: postgresql://optiquery:optiquery@primary:5432/optiquery
       SHADOW_DSN: postgresql://optiquery:optiquery@shadow:5432/optiquery
+    # The whole repo is bind-mounted over the image's copy so edits take effect
+    # without a rebuild. Dependencies live in site-packages, not /app, so
+    # shadowing /app does not hide them.
     volumes:
-      - ./seed:/app/seed
-      - ./app:/app/app
+      - .:/app
     command: ["python", "seed/generate_data.py", "--target", "both"]
 
 volumes:

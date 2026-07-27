@@ -9,7 +9,7 @@ COMPOSE := docker compose
 RUN     := $(COMPOSE) run --rm seeder
 
 .DEFAULT_GOAL := help
-.PHONY: help up down clean build seed baseline reset psql-primary psql-shadow logs
+.PHONY: help up down clean build seed baseline test reset psql-primary psql-shadow logs
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -32,6 +32,9 @@ seed: up build ## Load 4.75M rows into both databases, then VACUUM ANALYZE
 
 baseline: ## Time the four seed queries against primary and check they are slow
 	$(RUN) python seed/measure_baseline.py
+
+test: up ## Run the test suite against the seeded databases
+	$(RUN) pytest
 
 reset: clean seed ## Drop everything and reseed from scratch
 
