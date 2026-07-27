@@ -112,6 +112,22 @@ services:
     environment:
       PRIMARY_DSN: postgresql://optiquery:optiquery@primary:5432/optiquery
       SHADOW_DSN: postgresql://optiquery:optiquery@shadow:5432/optiquery
+      # Model provider. Every one of these is forwarded from the host shell and
+      # is empty unless set there, so the container never carries a baked-in
+      # key. app/llm.py picks whichever is present; OPTIQUERY_PROVIDER forces
+      # one explicitly and OPTIQUERY_MODEL overrides that provider's default.
+      OPTIQUERY_PROVIDER: ${OPTIQUERY_PROVIDER:-}
+      OPTIQUERY_MODEL: ${OPTIQUERY_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # Reaches the host's Ollama from inside the container.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # The whole repo is bind-mounted over the image's copy so edits take effect
     # without a rebuild. Dependencies live in site-packages, not /app, so
     # shadowing /app does not hide them.
