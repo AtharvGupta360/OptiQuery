@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.env
+
+# Phase 4 run artifacts and Phase 6 build output
+runs/
+frontend/node_modules/
+frontend/dist/
+frontend/public/runs/*.json

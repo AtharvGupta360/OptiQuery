@@ -20,6 +20,13 @@ name: optiquery
 #       durability roughly halves the bulk COPY load time. It has no effect on
 #       the read benchmarks the verifier actually measures.
 #
+#   shared_buffers=1536MB
+#       The full working set of the seed workload is ~1.25GB (order_items 1.0GB
+#       + orders 152MB + users 28MB). Sizing shared_buffers above that keeps
+#       every timed run served from the same place, so the spread between the
+#       fastest and slowest of five runs stays inside a few percent. Two
+#       instances at this size is ~3GB; Docker Desktop needs >=6GB allocated.
+#
 #   random_page_cost=1.1, effective_cache_size=3GB
 #       SSD-shaped cost model. With the stock value of 4.0 the planner
 #       systematically over-prices index scans on rotational-disk assumptions
@@ -36,7 +43,7 @@ x-postgres-common: &postgres-common
   command:
     - postgres
     - -c
-    - shared_buffers=1GB
+    - shared_buffers=1536MB
     - -c
     - effective_cache_size=3GB
     - -c

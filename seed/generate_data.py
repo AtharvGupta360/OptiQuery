@@ -33,7 +33,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Sequence
+from typing import Iterator, Sequence
 
 import psycopg
 
@@ -404,8 +404,14 @@ def gen_order_items() -> Iterator[str]:
     rnd = random.Random(SEED_ITEMS)
     price_pool = [f"{rnd.uniform(3, 1400):.2f}" for _ in range(20_000)]
     discount_pool = [f"{rnd.uniform(0, 35):.2f}" for _ in range(5_000)]
+    # ~235 characters per note. Row width is the knob that sets how expensive a
+    # full sequential scan of this table is, and three of the four seed queries
+    # are dominated by exactly that scan. At ~130 chars the scan measured 376ms,
+    # which is not slow enough to be worth optimising; at ~235 it measures ~550ms
+    # and every seed query clears the 800ms bar with margin. See
+    # seed/measure_baseline.py for the numbers.
     note_pool = [
-        ", ".join(rnd.sample(NOTE_FRAGMENTS, k=rnd.randint(3, 5)))
+        ", ".join(rnd.sample(NOTE_FRAGMENTS, k=rnd.randint(6, 8)))
         for _ in range(20_000)
     ]
 
@@ -673,7 +679,9 @@ def load(dsn: str, target: str, capture_params: bool) -> dict[str, str]:
                 (list(TABLE_COLUMNS),),
             )
             for relname, est_rows, total_size in cur.fetchall():
-                _log(target, f"  {relname:<12} {est_rows:>11} rows  {total_size:>9}")
+                # reltuples is the planner's estimate, not an exact count. The
+                # exact count is asserted per table in copy_table().
+                _log(target, f"  {relname:<12} ~{est_rows:>11} rows  {total_size:>9}")
 
         params = capture_query_params(conn) if capture_params else {}
 
