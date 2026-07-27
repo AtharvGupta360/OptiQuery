@@ -256,11 +256,20 @@ class TestCreateAndDropIndexOnShadow:
         assert after == before
 
 
-class TestBenchmarkIsDeferred:
-    def test_raises_with_a_pointer_to_the_real_implementation(self, ctx: ToolContext) -> None:
-        """A naive timing loop here would be worse than nothing. See Phase 3."""
-        with pytest.raises(NotImplementedError, match="Phase 3"):
-            benchmark(ctx, "SELECT 1")
+class TestBenchmarkTool:
+    """The tool wrapper. The methodology itself is tested in test_verifier.py."""
+
+    def test_returns_median_row_count_and_checksum(self, ctx: ToolContext) -> None:
+        result = benchmark(ctx, "SELECT id, email FROM users WHERE id <= 100", runs=3)
+        assert result["runs"] == 3
+        assert len(result["samples_ms"]) == 3
+        assert result["row_count"] == 100
+        assert len(result["checksum"]) == 64
+        assert result["discarded_warmup_ms"] > 0
+
+    def test_rejects_a_mutation(self, ctx: ToolContext) -> None:
+        with pytest.raises(SqlGuardError):
+            benchmark(ctx, "DELETE FROM users WHERE id = -1")
 
 
 class TestFinish:

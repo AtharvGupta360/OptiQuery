@@ -44,6 +44,8 @@ from app.shadow import (
     fetch_index_records,
     open_shadow,
 )
+from app.verifier import DEFAULT_RUNS, BenchmarkError
+from app.verifier import benchmark as run_benchmark
 
 # Tools whose return value ends the agent loop.
 TERMINAL_TOOLS = frozenset({"finish"})
@@ -391,20 +393,22 @@ def drop_index_on_shadow(ctx: ToolContext, name: str) -> dict[str, Any]:
     return ctx.shadow.drop_index(name)
 
 
-def benchmark(ctx: ToolContext, sql: str, runs: int = 5) -> dict[str, Any]:
-    """Not implemented until Phase 3 -- deliberately.
+def benchmark(ctx: ToolContext, sql: str, runs: int = DEFAULT_RUNS) -> dict[str, Any]:
+    """Time a query on shadow and fingerprint what it returned.
 
-    A naive implementation here would be worse than none. Timing the first
-    execution measures disk reads that the second execution will not pay;
-    averaging instead of taking the median lets one scheduler hiccup decide
-    whether a recommendation ships; and comparing row counts instead of a
-    checksum accepts rewrites that return the wrong rows in the right quantity.
-    The real implementation lives in app/verifier.py.
+    Thin wrapper over app.verifier.benchmark, which is where the methodology
+    lives: the first run is executed and discarded because it pays for reading
+    the heap off disk; the reported figure is the median of the runs after it;
+    and the returned checksum is what makes "same rows" checkable rather than
+    assertable.
+
+    Whatever indexes currently exist on shadow are in effect. Calling this after
+    create_index_on_shadow measures the query WITH the candidate index, which is
+    the point -- but the comparison against the original is only meaningful if
+    shadow was at its baseline when the original was measured.
     """
-    raise NotImplementedError(
-        "benchmark() is implemented in Phase 3 (app/verifier.py). A naive "
-        "timing loop here would report page-cache warming as a speedup."
-    )
+    result = run_benchmark(ctx.shadow, sql, runs=runs)
+    return result.to_json()
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +505,7 @@ class ToolRegistry:
         """
         try:
             return json.dumps(self.call(name, arguments), default=str)
-        except (ToolError, SqlGuardError, NotImplementedError) as exc:
+        except (ToolError, SqlGuardError, BenchmarkError, TypeError) as exc:
             return json.dumps({"error": type(exc).__name__, "message": str(exc)})
 
     def is_terminal(self, name: str) -> bool:
