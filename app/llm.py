@@ -76,7 +76,11 @@ PROVIDERS: dict[str, ProviderSpec] = {
     "gemini": ProviderSpec(
         name="gemini",
         base_url="https://generativelanguage.googleapis.com/v1beta/openai",
-        default_model="gemini-2.5-flash",
+        # Verified against a free-tier key: emits well-formed parallel tool calls
+        # from this project's own system prompt. gemini-2.5-* is deliberately not
+        # the default -- it 404s for keys created after it was restricted, and
+        # every Pro model 429s on the free tier.
+        default_model="gemini-3.6-flash",
         api_key_env=("GEMINI_API_KEY", "GOOGLE_API_KEY"),
         notes="Free tier at aistudio.google.com/apikey. Long context, strong tool calling.",
     ),
@@ -111,7 +115,9 @@ PROVIDERS: dict[str, ProviderSpec] = {
     ),
     "ollama": ProviderSpec(
         name="ollama",
-        base_url=os.environ.get("OLLAMA_HOST", "http://localhost:11434") + "/v1",
+        # `or` rather than a get() default: env_file passes declared-but-blank
+        # keys through as empty strings, which would build the base URL "/v1".
+        base_url=(os.environ.get("OLLAMA_HOST") or "http://localhost:11434") + "/v1",
         default_model="qwen3:8b",
         api_key_env=(),
         requires_key=False,

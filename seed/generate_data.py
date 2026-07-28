@@ -45,7 +45,9 @@ PARAMS_PATH = SEED_DIR / "query_params.json"
 # Row counts. Fixed by the project spec; overridable only to make local
 # smoke-testing of this file cheap (OPTIQUERY_SCALE=0.01 -> 1% of every table).
 # ---------------------------------------------------------------------------
-SCALE = float(os.environ.get("OPTIQUERY_SCALE", "1.0"))
+# `or` rather than a get() default: env_file passes declared-but-blank keys
+# through as empty strings, and float("") raises.
+SCALE = float(os.environ.get("OPTIQUERY_SCALE") or "1.0")
 
 N_USERS = int(200_000 * SCALE)
 N_PRODUCTS = int(50_000 * SCALE)

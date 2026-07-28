@@ -109,23 +109,27 @@ services:
         condition: service_healthy
       shadow:
         condition: service_healthy
+    # .env is the single source of truth for configuration, and env_file is what
+    # makes that true. The obvious alternative -- listing each key under
+    # `environment:` as ${GEMINI_API_KEY:-} -- looks equivalent but is not: that
+    # form is shell substitution, and Docker Compose resolves it from the host
+    # environment *in preference to* .env. A stale GEMINI_API_KEY left in the
+    # user's Windows or shell profile would then silently override the key in
+    # .env, and the run would use a credential nobody could see in the repo.
+    # env_file has no such fallback: the file wins, full stop.
+    #
+    # required: false so a clean clone without a .env still starts. Providers
+    # are then simply unconfigured, which app/llm.py reports by name.
+    env_file:
+      - path: .env
+        required: false
+    # `environment:` takes precedence over env_file, so only values that must
+    # NOT be user-overridable belong here. The DSNs are compose-network
+    # addresses; a .env pointing them elsewhere would silently benchmark the
+    # wrong database.
     environment:
       PRIMARY_DSN: postgresql://optiquery:optiquery@primary:5432/optiquery
       SHADOW_DSN: postgresql://optiquery:optiquery@shadow:5432/optiquery
-      # Model provider. Every one of these is forwarded from the host shell and
-      # is empty unless set there, so the container never carries a baked-in
-      # key. app/llm.py picks whichever is present; OPTIQUERY_PROVIDER forces
-      # one explicitly and OPTIQUERY_MODEL overrides that provider's default.
-      OPTIQUERY_PROVIDER: ${OPTIQUERY_PROVIDER:-}
-      OPTIQUERY_MODEL: ${OPTIQUERY_MODEL:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
-      CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      # Reaches the host's Ollama from inside the container.
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     # The whole repo is bind-mounted over the image's copy so edits take effect
