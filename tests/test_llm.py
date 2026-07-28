@@ -102,6 +102,64 @@ class TestMessageTranslation:
             "sql": "SELECT 1"
         }
 
+    def test_provider_fields_on_a_tool_call_are_echoed_back(self) -> None:
+        """Gemini 3.x 400s on the next turn without its thought_signature.
+
+        Reconstructing a tool call from (id, name, input) alone is lossy in a
+        way nothing catches until a real multi-turn run: the first request
+        succeeds, and the second is rejected outright.
+        """
+        signature = {"google": {"thought_signature": "EroBCrcBARFNMg9t"}}
+        out = to_openai_messages(
+            None,
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        ToolUseBlock(
+                            id="tu_1",
+                            name="explain_query",
+                            input={"sql": "SELECT 1"},
+                            extra={"extra_content": signature},
+                        )
+                    ],
+                }
+            ],
+        )
+        assert out[0]["tool_calls"][0]["extra_content"] == signature
+        # The reconstructed fields survive alongside it.
+        assert out[0]["tool_calls"][0]["function"]["name"] == "explain_query"
+        assert out[0]["tool_calls"][0]["id"] == "tu_1"
+
+    def test_a_tool_call_round_trips_through_both_translators(self) -> None:
+        """The path an actual loop takes: response -> history -> next request."""
+        response = from_openai_response(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "id": "QM51W29P",
+                                    "type": "function",
+                                    "extra_content": {"google": {"thought_signature": "abc"}},
+                                    "function": {
+                                        "name": "benchmark",
+                                        "arguments": '{"sql":"SELECT 1"}',
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+        replayed = to_openai_messages(
+            None, [{"role": "assistant", "content": response.content}]
+        )
+        assert replayed[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "abc"
+
     def test_thinking_blocks_are_not_replayed_as_assistant_text(self) -> None:
         """Private reasoning must not come back looking like a stated claim."""
         out = to_openai_messages(

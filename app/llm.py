@@ -87,9 +87,13 @@ PROVIDERS: dict[str, ProviderSpec] = {
     "groq": ProviderSpec(
         name="groq",
         base_url="https://api.groq.com/openai/v1",
-        default_model="llama-3.3-70b-versatile",
+        # Verified against a free-tier key with this project's tool schema.
+        # Alternatives that also emit well-formed calls: llama-3.3-70b-versatile,
+        # qwen/qwen3.6-27b, openai/gpt-oss-20b. The groq/compound* models reject
+        # tool calling outright.
+        default_model="openai/gpt-oss-120b",
         api_key_env=("GROQ_API_KEY",),
-        notes="Free tier at console.groq.com. Fast; context is the binding constraint.",
+        notes="Free tier at console.groq.com. Fast, 131k context, generous daily limits.",
     ),
     "cerebras": ProviderSpec(
         name="cerebras",
@@ -169,6 +173,16 @@ class ToolUseBlock:
     name: str
     input: dict[str, Any]
     type: str = "tool_use"
+    #: Provider fields carried on the tool call that must be echoed back
+    #: verbatim when this turn is replayed. Kept opaque on purpose -- the
+    #: contents are the provider's business, and a translator that understood
+    #: them would need updating every time one changed.
+    #:
+    #: Gemini 3.x puts `extra_content.google.thought_signature` here and rejects
+    #: the next request with a 400 if it does not come back, which ends the run
+    #: on the first tool call. Reconstructing a tool call from (id, name, input)
+    #: alone is lossy in a way nothing surfaces until a real multi-turn run.
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -260,8 +274,11 @@ def to_openai_messages(
             texts = [
                 str(_bget(b, "text", "")) for b in blocks if _btype(b) == "text"
             ]
-            tool_calls = [
-                {
+            tool_calls = []
+            for b in blocks:
+                if _btype(b) != "tool_use":
+                    continue
+                call: dict[str, Any] = {
                     "id": str(_bget(b, "id", "")),
                     "type": "function",
                     "function": {
@@ -269,9 +286,11 @@ def to_openai_messages(
                         "arguments": json.dumps(_bget(b, "input", {}) or {}, default=str),
                     },
                 }
-                for b in blocks
-                if _btype(b) == "tool_use"
-            ]
+                # Replayed before the reconstructed keys would overwrite them,
+                # but after id/function are set, so a provider that returns its
+                # own id here keeps it.
+                call.update(_bget(b, "extra", None) or {})
+                tool_calls.append(call)
             # Thinking blocks are dropped: no portable representation, and
             # replaying them as assistant text would let one turn's private
             # reasoning be mistaken for a claim in the next.
@@ -371,6 +390,14 @@ def from_openai_response(payload: dict[str, Any]) -> Response:
                 id=str(call.get("id") or f"call_{index}"),
                 name=str(function.get("name") or ""),
                 input=_parse_arguments(function.get("arguments")),
+                # Anything the provider sent that this translator does not model.
+                # Kept whole rather than allow-listed, so a new required field
+                # round-trips without a code change.
+                extra={
+                    key: value
+                    for key, value in call.items()
+                    if key not in ("id", "type", "function")
+                },
             )
         )
 
@@ -481,7 +508,19 @@ class OpenAICompatClient:
     def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         last_error = ""
         for attempt in range(self.max_retries + 1):
-            response = self._http.post(path, json=body)
+            try:
+                response = self._http.post(path, json=body)
+            except httpx.TransportError as exc:
+                # Connection reset, DNS blip, read timeout. Retried on the same
+                # reasoning as a 429: a run twelve iterations deep has already
+                # paid for every hypothesis it measured, and dropping all of it
+                # over one unreachable packet is the expensive failure.
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempt == self.max_retries:
+                    raise LLMError(f"{self.spec.name} unreachable -- {last_error}") from exc
+                time.sleep(min(2.0**attempt, 60.0))
+                continue
+
             if response.status_code < 400:
                 try:
                     return response.json()

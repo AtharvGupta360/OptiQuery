@@ -29,6 +29,7 @@ gives the Phase 6 timeline something honest to render.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -37,9 +38,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
-from app.db import SqlGuardError
 from app.shadow import ShadowIsolationError
-from app.tools import ToolContext, ToolError, ToolRegistry
+from app.tools import ToolContext, ToolRegistry
 from app.verifier import (
     MIN_IMPROVEMENT_PCT,
     OVERSIZED_INDEX_PCT,
@@ -64,6 +64,11 @@ class StopReason(str, Enum):
     ITERATION_LIMIT = "iteration_limit"
     TOKEN_BUDGET = "token_budget"
     MODEL_STOPPED = "model_stopped_without_finishing"
+    # Distinct from MODEL_STOPPED on purpose. A model that ran out of output
+    # tokens mid-turn produces the same empty content as one that decided it was
+    # done, and reporting the first as the second turns a fixable configuration
+    # problem into a false claim about what the model concluded.
+    OUTPUT_TRUNCATED = "output_truncated"
     ERROR = "error"
 
 
@@ -638,6 +643,34 @@ class AgentConfig:
     effort: str = DEFAULT_EFFORT
     benchmark_runs: int = 5
 
+    @classmethod
+    def from_env(cls, model: str | None = None, **overrides: Any) -> "AgentConfig":
+        """Read the tunables that differ between providers.
+
+        `max_tokens` is here because it is not merely a ceiling on the reply:
+        some providers bill the *reserved* amount against a rate limit, so
+        asking for 16,000 tokens of headroom costs 16,000 tokens of quota even
+        when the model emits a 60-token tool call. Groq's free tier rejects the
+        request outright on that arithmetic (8,000 TPM, ~1,800 of actual
+        prompt). Lowering it is the difference between a usable free tier and a
+        413 on the first turn -- but lower it too far and a thinking model
+        spends the whole allowance reasoning and returns empty content, which
+        is why this is a knob and not a smaller default.
+        """
+        def _int(name: str, fallback: int) -> int:
+            raw = os.environ.get(name)
+            return int(raw) if raw and raw.strip() else fallback
+
+        return cls(
+            model=model or os.environ.get("OPTIQUERY_MODEL") or DEFAULT_MODEL,
+            max_iterations=_int("OPTIQUERY_MAX_ITERATIONS", DEFAULT_MAX_ITERATIONS),
+            max_tokens=_int("OPTIQUERY_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+            token_budget=_int("OPTIQUERY_TOKEN_BUDGET", DEFAULT_TOKEN_BUDGET),
+            effort=os.environ.get("OPTIQUERY_EFFORT") or DEFAULT_EFFORT,
+            benchmark_runs=_int("OPTIQUERY_BENCHMARK_RUNS", 5),
+            **overrides,
+        )
+
 
 class OptimizerAgent:
     """Drives the loop. Owns the trace, the budget, and the verified/claimed split."""
@@ -680,7 +713,19 @@ class OptimizerAgent:
                 }
                 return payload, False
             return self.registry.call(name, arguments), False
-        except (ToolError, SqlGuardError, BenchmarkError, ValueError, TypeError) as exc:
+        except ShadowIsolationError:
+            # The one failure that is not information. Shadow can no longer
+            # stand in for primary, so every later measurement is meaningless
+            # and continuing would produce numbers that describe nothing.
+            raise
+        except Exception as exc:  # noqa: BLE001 - see below
+            # Deliberately broad. A tool boundary is exactly where an
+            # unanticipated failure should become an observation rather than
+            # end the run: psycopg raises UndefinedTable for a mistyped table,
+            # and losing every hypothesis proven so far over a typo is a worse
+            # outcome than handing the model its own error text. Nothing is
+            # swallowed -- the exception type and message go back into context,
+            # into the trace with is_error set, and into the saved artifact.
             return {"error": type(exc).__name__, "message": str(exc)}, True
 
     def _test_hypothesis(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -801,10 +846,18 @@ class OptimizerAgent:
                 trace.append(record)
 
                 if not tool_uses:
-                    # end_turn with no tool call: the model considers itself done
-                    # but never called finish, so there is nothing verified to
-                    # ship beyond what it already tested.
-                    stop_reason = StopReason.MODEL_STOPPED
+                    # No tool call means the turn is over either way, but not for
+                    # the same reason. `max_tokens` is the budget running out
+                    # mid-generation -- observed on thinking models, where
+                    # reasoning consumes the whole allowance and the response
+                    # comes back completely empty. Treating that as "the model
+                    # considers itself done" would hide a one-line fix behind a
+                    # conclusion the model never reached.
+                    stop_reason = (
+                        StopReason.OUTPUT_TRUNCATED
+                        if record.stop_reason == "max_tokens"
+                        else StopReason.MODEL_STOPPED
+                    )
                     break
 
                 # Thinking blocks must be echoed back unmodified, so the whole
@@ -905,11 +958,21 @@ class OptimizerAgent:
                 for result in accepted
             ]
 
+        # Exploration through create_index_on_shadow is not cleaned up by the
+        # tool itself, and a run that ends without testing a hypothesis -- the
+        # iteration cap, an error, a model that only explored -- never passes
+        # through _test_hypothesis's reset. Those indexes would then be present
+        # for the drift measurement below, and still present when the next query
+        # is optimised, making its baseline wrong in a way nothing reports.
+        leaked = self.ctx.shadow.reset()
+
         drift: dict[str, Any] | None = None
         try:
             drift = self.verifier.check_baseline_drift(original_sql)
         except (BenchmarkError, ShadowIsolationError) as exc:
             drift = {"error": f"{type(exc).__name__}: {exc}"}
+        if drift is not None and leaked.dropped:
+            drift["indexes_cleared_before_measuring"] = leaked.dropped
 
         finished = datetime.now(timezone.utc)
         return AgentRun(
