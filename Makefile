@@ -9,7 +9,14 @@ COMPOSE := docker compose
 RUN     := $(COMPOSE) run --rm seeder
 
 .DEFAULT_GOAL := help
-.PHONY: help up down clean build seed baseline test reset psql-primary psql-shadow logs
+.PHONY: help up down clean build seed baseline test test-live reset \
+        optimize artifacts serve psql-primary psql-shadow logs
+
+# Overridable on the command line: `make optimize QUERY="SELECT ..."` or
+# `make optimize SEED=q2`.
+QUERY ?=
+SEED  ?= q2
+OUT   ?= runs
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -34,7 +41,26 @@ baseline: ## Time the four seed queries against primary and check they are slow
 	$(RUN) python seed/measure_baseline.py
 
 test: up ## Run the test suite against the seeded databases
-	$(RUN) pytest
+	$(RUN) pytest -m "not live"
+
+test-live: up ## Also run the tests that call a real model provider (costs tokens)
+	$(RUN) pytest -m live -rs
+
+optimize: up ## Optimise one query: make optimize SEED=q2, or QUERY="SELECT ..."
+	@if [ -n "$(QUERY)" ]; then \
+		$(RUN) python cli.py "$(QUERY)" --output $(OUT); \
+	else \
+		$(RUN) python cli.py --seed $(SEED) --output $(OUT); \
+	fi
+
+# Writes into the directory the Phase 6 frontend reads at build time, so the
+# deployed site is a set of real measured runs rather than fixtures.
+artifacts: up ## Run all four seed queries and write JSON for the frontend
+	$(RUN) python cli.py --all --output frontend/public/runs
+
+serve: up ## Serve POST /optimize on http://localhost:8000 (docs at /docs)
+	$(COMPOSE) run --rm -p 8000:8000 seeder \
+		uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 reset: clean seed ## Drop everything and reseed from scratch
 

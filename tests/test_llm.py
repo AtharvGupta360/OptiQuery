@@ -16,6 +16,7 @@ import pytest
 
 from app.agent import TOOL_SCHEMAS
 from app.llm import (
+    MAX_RETRY_SLEEP_S,
     PROVIDERS,
     LLMError,
     OpenAICompatClient,
@@ -25,6 +26,7 @@ from app.llm import (
     ToolUseBlock,
     _parse_arguments,
     from_openai_response,
+    retry_delay,
     to_openai_messages,
     to_openai_tools,
 )
@@ -390,6 +392,33 @@ class TestClientContract:
                 model="nope", max_tokens=10, messages=[{"role": "user", "content": "x"}]
             )
         client.close()
+
+
+class TestRetryDelay:
+    def make(self, *, status: int = 429, headers: dict | None = None, body: str = "") -> httpx.Response:
+        return httpx.Response(status, headers=headers or {}, text=body)
+
+    def test_an_explicit_header_beats_backoff(self) -> None:
+        assert retry_delay(self.make(headers={"retry-after": "12"}), attempt=0) == 12.0
+
+    def test_a_delay_stated_in_the_body_is_honoured(self) -> None:
+        """Gemini states the wait in the body; backoff alone gave up at 15s."""
+        body = '{"error": {"message": "Please retry in 37.716901999s."}}'
+        delay = retry_delay(self.make(body=body), attempt=0)
+        assert 38.0 <= delay <= 39.0, "the stated wait plus a second of slack"
+
+    def test_backoff_is_only_the_fallback(self) -> None:
+        assert retry_delay(self.make(body="no hint here"), attempt=3) == 8.0
+
+    def test_a_single_sleep_is_capped(self) -> None:
+        """A longer wait is a quota that will not return inside this run."""
+        body = "please retry in 86400s"
+        assert retry_delay(self.make(body=body), attempt=0) == MAX_RETRY_SLEEP_S
+        assert retry_delay(self.make(body=""), attempt=20) == MAX_RETRY_SLEEP_S
+
+    def test_an_http_date_header_falls_through_instead_of_raising(self) -> None:
+        response = self.make(headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"})
+        assert retry_delay(response, attempt=2) == 4.0
 
 
 class TestProviderRegistry:

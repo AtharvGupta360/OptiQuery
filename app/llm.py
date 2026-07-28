@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
@@ -431,6 +432,40 @@ def from_openai_response(payload: dict[str, Any]) -> Response:
 # ---------------------------------------------------------------------------
 
 
+#: "Please retry in 37.716901999s" -- Gemini states the wait in the body rather
+#: than in a Retry-After header, and exponential backoff alone gives up well
+#: short of it.
+_RETRY_HINT = re.compile(r"retry (?:in|after)\s+([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
+
+#: Ceiling on a single sleep. A wait longer than this is a quota that will not
+#: come back inside a run, and blocking on it hides the real answer: use a
+#: different provider or a smaller request.
+MAX_RETRY_SLEEP_S = 90.0
+
+
+def retry_delay(response: httpx.Response, attempt: int) -> float:
+    """How long to wait before retrying, preferring what the provider asked for.
+
+    Order matters: an explicit instruction beats a guess. Exponential backoff
+    is only the fallback for a provider that says nothing, and on its own it
+    surrendered after 15s to a limit that wanted 37.
+    """
+    header = response.headers.get("retry-after", "").strip()
+    if header:
+        try:
+            return min(float(header), MAX_RETRY_SLEEP_S)
+        except ValueError:
+            pass  # HTTP-date form; fall through to the body hint and backoff.
+
+    match = _RETRY_HINT.search(response.text or "")
+    if match:
+        # A whole second of slack: retrying at the exact boundary races the
+        # provider's own window and earns a second 429.
+        return min(float(match.group(1)) + 1.0, MAX_RETRY_SLEEP_S)
+
+    return min(2.0**attempt, MAX_RETRY_SLEEP_S)
+
+
 class _Messages:
     def __init__(self, client: "OpenAICompatClient") -> None:
         self._client = client
@@ -532,9 +567,7 @@ class OpenAICompatClient:
             if not retryable or attempt == self.max_retries:
                 raise LLMError(f"{self.spec.name} request failed -- {last_error}")
 
-            retry_after = response.headers.get("retry-after")
-            delay = float(retry_after) if retry_after and retry_after.isdigit() else 2.0**attempt
-            time.sleep(min(delay, 60.0))
+            time.sleep(retry_delay(response, attempt))
 
         raise LLMError(f"{self.spec.name} request failed -- {last_error}")
 

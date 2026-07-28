@@ -661,15 +661,20 @@ class AgentConfig:
             raw = os.environ.get(name)
             return int(raw) if raw and raw.strip() else fallback
 
-        return cls(
-            model=model or os.environ.get("OPTIQUERY_MODEL") or DEFAULT_MODEL,
-            max_iterations=_int("OPTIQUERY_MAX_ITERATIONS", DEFAULT_MAX_ITERATIONS),
-            max_tokens=_int("OPTIQUERY_MAX_TOKENS", DEFAULT_MAX_TOKENS),
-            token_budget=_int("OPTIQUERY_TOKEN_BUDGET", DEFAULT_TOKEN_BUDGET),
-            effort=os.environ.get("OPTIQUERY_EFFORT") or DEFAULT_EFFORT,
-            benchmark_runs=_int("OPTIQUERY_BENCHMARK_RUNS", 5),
-            **overrides,
-        )
+        # Merged rather than splatted alongside: an explicit override for a
+        # field the environment also sets would otherwise be a duplicate
+        # keyword argument, which is a TypeError at the call site rather than
+        # the override winning.
+        settings: dict[str, Any] = {
+            "model": model or os.environ.get("OPTIQUERY_MODEL") or DEFAULT_MODEL,
+            "max_iterations": _int("OPTIQUERY_MAX_ITERATIONS", DEFAULT_MAX_ITERATIONS),
+            "max_tokens": _int("OPTIQUERY_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+            "token_budget": _int("OPTIQUERY_TOKEN_BUDGET", DEFAULT_TOKEN_BUDGET),
+            "effort": os.environ.get("OPTIQUERY_EFFORT") or DEFAULT_EFFORT,
+            "benchmark_runs": _int("OPTIQUERY_BENCHMARK_RUNS", 5),
+        }
+        settings.update({key: value for key, value in overrides.items() if value is not None})
+        return cls(**settings)
 
 
 class OptimizerAgent:
